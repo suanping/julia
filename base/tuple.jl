@@ -229,26 +229,30 @@ function (T::All16{E,N})(itr) where {E,N}
     (elts...,)
 end
 
-(::Type{T})(itr) where {T<:Tuple} = _totuple(T, itr, start(itr))
-
-_totuple(::Type{Tuple{}}, itr, s) = ()
+@generated function f(::Type{T}, itr)::T where {T<:Tuple}
+    if Base.isvatuple(T)
+        return :(convert(T, (itr...,)))
+    end
+    tuple_expr = Expr(:tuple)
+    for i in 1:fieldcount(T)
+        push!(tuple_expr.args, quote
+            if done(itr, state)
+                Base._totuple_err(T)
+            else
+                item, state = next(itr, state)
+                convert(fieldtype(T, $i), item)
+            end
+        end)
+    end
+    return quote
+        state = start(itr)
+        $tuple_expr
+    end
+end
 
 function _totuple_err(@nospecialize T)
     @_noinline_meta
     throw(ArgumentError("too few elements for tuple type $T"))
-end
-
-function _totuple(T, itr, s)
-    @_inline_meta
-    done(itr, s) && _totuple_err(T)
-    v, s = next(itr, s)
-    (convert(tuple_type_head(T), v), _totuple(tuple_type_tail(T), itr, s)...)
-end
-
-_totuple(::Type{Tuple{Vararg{E}}}, itr, s) where {E} = (collect(E, Iterators.rest(itr,s))...,)
-
-_totuple(::Type{Tuple}, itr, s) = (collect(Iterators.rest(itr,s))...,)
-
 end
 
 ## comparison ##
