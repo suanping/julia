@@ -2314,56 +2314,65 @@
                (let ((ranges (cddr (caddr e))))
                  (if (any (lambda (x) (eq? x ':)) ranges)
                      (error "comprehension syntax with `:` ranges has been removed"))
-                 (and (every (lambda (x) (and (pair? x) (eq? (car x) '=)
-                                              (pair? (caddr x))
-                                              (eq? (car (caddr x)) 'call)
-                                              (eq? (cadr (caddr x)) ':)))
+                 (and (every (lambda (x) (and (pair? x) (eq? (car x) '=)))
                              ranges)
                       ;; TODO: this is a hack to lower simple comprehensions to loops very
                       ;; early, to greatly reduce the # of functions and load on the compiler
                       (lower-comprehension (cadr e) (cadr (caddr e)) ranges))))
           `(call (top collect) ,(cadr e) ,(caddr e)))))))
 
-(define (lower-comprehension atype expr ranges)
-  (let ((result    (make-ssavalue))
-        (ri        (gensy))
+(define (lower-comprehension ty expr itrs)
+  (let ((result    (gensy))
+        (idx       (gensy))
         (oneresult (make-ssavalue))
-        (lengths   (map (lambda (x) (make-ssavalue)) ranges))
-        (states    (map (lambda (x) (gensy)) ranges))
-        (rv        (map (lambda (x) (make-ssavalue)) ranges)))
+        (prod      (make-ssavalue))
+        (isz       (make-ssavalue))
+        (states    (map (lambda (x) (gensy)) itrs))
+        (iv        (map (lambda (x) (make-ssavalue)) itrs)))
 
-    ;; construct loops to cycle over all dimensions of an n-d comprehension
-    (define (construct-loops ranges rv states lengths)
-      (if (null? ranges)
+    ;; construct loops over all iterators
+    (define (construct-loops itrs iv states)
+      (if (null? itrs)
           `(block (= ,oneresult ,expr)
                   (inbounds true)
-                  (call (top setindex!) ,result ,oneresult ,ri)
+                  (if (call (core isa) ,isz (top SizeUnknown))
+                      (call (top push!) ,result ,oneresult)
+                      (call (top setindex!) ,result ,oneresult ,idx))
                   (inbounds pop)
-                  (= ,ri (call (top add_int) ,ri 1)))
+                  (= ,idx (call (top add_int) ,idx 1)))
           `(block
-            (= ,(car states) (call (top start) ,(car rv)))
-            (while (call (top not_int) (call (core typeassert) (call (top done) ,(car rv) ,(car states)) (core Bool)))
+            (= ,(car states) (call (top start) ,(car iv)))
+            (while (call (top not_int) (call (core typeassert) (call (top done) ,(car iv) ,(car states)) (core Bool)))
                    (scope-block
-                   (block
-                    (= (tuple ,(cadr (car ranges)) ,(car states))
-                       (call (top next) ,(car rv) ,(car states)))
-                    ;; *** either this or force all for loop vars local
-                    ,.(map (lambda (r) `(local ,r))
-                           (lhs-vars (cadr (car ranges))))
-                    ,(construct-loops (cdr ranges) (cdr rv) (cdr states) (cdr lengths))))))))
+                    (block
+                     (= (tuple ,(cadr (car itrs)) ,(car states))
+                        (call (top next) ,(car iv) ,(car states)))
+                     ;; *** either this or force all for loop vars local
+                     ,.(map (lambda (r) `(local ,r))
+                            (lhs-vars (cadr (car itrs))))
+                     ,(construct-loops (cdr itrs) (cdr iv) (cdr states))))))))
 
-    ;; Evaluate the comprehension
-    `(block
-      ,.(map (lambda (v) `(local ,v)) states)
-      (local ,ri)
-      ,.(map (lambda (v r) `(= ,v ,(caddr r))) rv ranges)
-      ,.(map (lambda (v r) `(= ,v (call (top length) ,r))) lengths rv)
-      (scope-block
-       (block
-        (= ,result (call (curly Array ,atype ,(length lengths)) undef ,@lengths))
-        (= ,ri 1)
-        ,(construct-loops (reverse ranges) (reverse rv) states (reverse lengths))
-        ,result)))))
+    (let ((overall-itr (if (length= itrs 1) (car iv) prod)))
+      `(scope-block
+        (block
+         (local ,result) (local ,idx)
+         ,.(map (lambda (v) `(local ,v)) states)
+         ,.(map (lambda (v r) `(= ,v ,(caddr r))) iv itrs)
+         ,.(if (length= itrs 1)
+               '()
+               `((= ,prod (call (top product) ,@iv))))
+         (= ,isz (call (top IteratorSize) ,overall-itr))
+         (if (call (core isa) ,isz (top HasShape))
+             (= ,result (|::| (call (top similar) (curly (core Array) ,ty) (call (top axes) ,overall-itr))
+                         (curly (core Array) ,ty)))
+             (if (call (core isa) ,isz (top HasLength))
+                 (= ,result (call (curly (core Array) ,ty 1) (core undef) (call (core Int)
+                                                                                (|::| (call (top length) ,overall-itr)
+                                                                                 (core Integer)))))
+                 (= ,result (call (curly (core Array) ,ty 1) (core undef) 0))))
+         (= ,idx 1)
+         ,(construct-loops (reverse itrs) (reverse iv) states)
+         ,result)))))
 
 (define (lhs-vars e)
   (cond ((symbol? e) (list e))
